@@ -2,7 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use crate::{
-    fl, wayland::AppRequest, wayland_subscription, wayland_subscription::WorkspacesUpdate,
+    fl,
+    layout::{LayoutTransition, WorkspaceLayoutMode, derive_layout_mode, plan_layout_transition},
+    wayland::AppRequest,
+    wayland_subscription,
+    wayland_subscription::WorkspacesUpdate,
 };
 use cctk::sctk::reexports::calloop::channel::SyncSender;
 use cosmic::{
@@ -13,11 +17,10 @@ use cosmic::{
     cosmic_theme::Spacing,
     iced::widget::{column, row},
     iced::{
-        Length, Subscription,
-        platform_specific::shell::wayland::commands::popup::{destroy_popup, get_popup},
-        window::Id,
+        Length, Limits, Subscription,
+        platform_specific::shell::wayland::commands::popup::destroy_popup, window::Id,
     },
-    surface, theme,
+    theme,
     widget::{
         container, divider,
         segmented_button::{self, Entity, SingleSelectModel},
@@ -26,22 +29,70 @@ use cosmic::{
 };
 use cosmic_comp_config::{CosmicCompConfig, TileBehavior};
 use cosmic_protocols::workspace::v2::client::zcosmic_workspace_handle_v2::TilingState;
-use std::{thread, time::Instant};
+use std::thread;
 use tracing::error;
 
+#[cfg(not(feature = "parallel-test-install"))]
 const ID: &str = "com.system76.CosmicAppletTiling";
+#[cfg(feature = "parallel-test-install")]
+const ID: &str = "com.system76.CosmicAppletWindowLayoutTest";
+
+#[cfg(not(feature = "parallel-test-install"))]
 const ON: &str = "com.system76.CosmicAppletTiling.On";
+#[cfg(feature = "parallel-test-install")]
+const ON: &str = "com.system76.CosmicAppletWindowLayoutTest.On";
+
+#[cfg(not(feature = "parallel-test-install"))]
 const OFF: &str = "com.system76.CosmicAppletTiling.Off";
+#[cfg(feature = "parallel-test-install")]
+const OFF: &str = "com.system76.CosmicAppletWindowLayoutTest.Off";
+
+#[cfg(not(feature = "parallel-test-install"))]
+const SCROLLING: &str = "com.system76.CosmicAppletTiling.Scrolling";
+#[cfg(feature = "parallel-test-install")]
+const SCROLLING: &str = "com.system76.CosmicAppletWindowLayoutTest.Scrolling";
+
+#[derive(Clone, Copy)]
+struct LayoutEntities {
+    floating: Entity,
+    tiling: Entity,
+    scrolling: Entity,
+}
+
+impl LayoutEntities {
+    fn mode(self, entity: Entity) -> Option<WorkspaceLayoutMode> {
+        if entity == self.floating {
+            Some(WorkspaceLayoutMode::Floating)
+        } else if entity == self.tiling {
+            Some(WorkspaceLayoutMode::Tiling)
+        } else if entity == self.scrolling {
+            Some(WorkspaceLayoutMode::Scrolling)
+        } else {
+            None
+        }
+    }
+
+    fn entity(self, mode: WorkspaceLayoutMode) -> Entity {
+        match mode {
+            WorkspaceLayoutMode::Floating => self.floating,
+            WorkspaceLayoutMode::Tiling => self.tiling,
+            WorkspaceLayoutMode::Scrolling => self.scrolling,
+        }
+    }
+}
 
 pub struct Window {
     core: Core,
     popup: Option<Id>,
     config: CosmicCompConfig,
     config_helper: Config,
+    current_workspace_layout_model: segmented_button::SingleSelectModel,
+    current_workspace_layout_entities: LayoutEntities,
     new_workspace_behavior_model: segmented_button::SingleSelectModel,
     new_workspace_entity: Entity,
     /// may not match the config value if behavior is per-workspace
     autotiled: bool,
+    layout_change_pending: bool,
     workspace_tx: Option<SyncSender<AppRequest>>,
 }
 
@@ -49,13 +100,13 @@ pub struct Window {
 pub enum Message {
     TogglePopup,
     PopupClosed(Id),
-    ToggleTileWindows(bool),
+    CurrentWorkspaceLayout(Entity),
+    LayoutChanged(Result<LayoutTransition, String>),
     ToggleActiveHint(bool),
     MyConfigUpdate(Box<CosmicCompConfig>),
     WorkspaceUpdate(WorkspacesUpdate),
     NewWorkspace(Entity),
     OpenSettings,
-    Surface(surface::Action<Message>),
 }
 
 impl cosmic::Application for Window {
@@ -87,6 +138,26 @@ impl cosmic::Application for Window {
             error!(?err, "Failed to set autotile behavior to PerWorkspace");
         }
 
+        let mut current_workspace_layout_model = SingleSelectModel::default();
+        let current_workspace_layout_entities = LayoutEntities {
+            floating: current_workspace_layout_model
+                .insert()
+                .text(fl!("floating"))
+                .id(),
+            tiling: current_workspace_layout_model
+                .insert()
+                .text(fl!("tiling"))
+                .id(),
+            scrolling: current_workspace_layout_model
+                .insert()
+                .text(fl!("scrolling"))
+                .id(),
+        };
+        current_workspace_layout_model.activate(
+            current_workspace_layout_entities
+                .entity(derive_layout_mode(config.autotile, config.tiling_engine)),
+        );
+
         let mut new_workspace_behavior_model = SingleSelectModel::default();
         let new_workspace_entity = new_workspace_behavior_model
             .insert()
@@ -106,8 +177,11 @@ impl cosmic::Application for Window {
             core,
             popup: None,
             autotiled: config.autotile,
+            layout_change_pending: false,
             config,
             config_helper,
+            current_workspace_layout_model,
+            current_workspace_layout_entities,
             new_workspace_behavior_model,
             new_workspace_entity,
             workspace_tx: None,
@@ -133,12 +207,13 @@ impl cosmic::Application for Window {
             Message::WorkspaceUpdate(msg) => match msg {
                 WorkspacesUpdate::State(state) => {
                     self.autotiled = matches!(state, TilingState::TilingEnabled);
-                    if self.popup.is_some() {}
+                    self.sync_current_workspace_layout();
                 }
                 WorkspacesUpdate::Started(tx) => {
                     self.workspace_tx = Some(tx);
                 }
                 WorkspacesUpdate::Errored => {
+                    self.workspace_tx = None;
                     error!("Workspaces subscription failed...");
                 }
             },
@@ -151,14 +226,15 @@ impl cosmic::Application for Window {
                         |app: &mut Self| {
                             let new_id = Id::unique();
                             app.popup = Some(new_id);
-                            let popup_settings = app.core.applet.get_popup_settings(
+                            let mut settings = app.core.applet.get_popup_settings(
                                 app.core.main_window_id().unwrap(),
                                 new_id,
                                 Some((1, 1)),
                                 None,
                                 None,
                             );
-                            popup_settings
+                            settings.positioner.size_limits = layout_popup_limits();
+                            settings
                         },
                         None,
                     ));
@@ -169,21 +245,38 @@ impl cosmic::Application for Window {
                     self.popup = None;
                 }
             }
-            Message::ToggleTileWindows(toggled) => {
-                self.autotiled = toggled;
-
-                // set via protocol
-                if let Some(tx) = self.workspace_tx.as_ref() {
-                    let state = if toggled {
-                        TilingState::TilingEnabled
-                    } else {
-                        TilingState::FloatingOnly
-                    };
-
-                    if let Err(err) = tx.send(AppRequest::TilingState(state)) {
-                        error!("Failed to send the tiling state update. {err:?}");
+            Message::CurrentWorkspaceLayout(entity) => {
+                let Some(mode) = self.current_workspace_layout_entities.mode(entity) else {
+                    error!("Unknown current-workspace layout entity");
+                    return Task::none();
+                };
+                return self.set_current_workspace_layout(mode);
+            }
+            Message::LayoutChanged(result) => {
+                self.layout_change_pending = false;
+                match result {
+                    Ok(transition) => {
+                        if let Some(engine) = transition.tiling_engine {
+                            self.config.tiling_engine = engine;
+                        }
+                        if let Some(tiled) = transition.workspace_tiled {
+                            let state = if tiled {
+                                TilingState::TilingEnabled
+                            } else {
+                                TilingState::FloatingOnly
+                            };
+                            if let Some(tx) = &self.workspace_tx {
+                                if let Err(err) = tx.try_send(AppRequest::TilingState(state)) {
+                                    error!(?err, "Failed to request workspace layout");
+                                }
+                            }
+                        }
                     }
+                    Err(err) => error!(%err, "Failed to change tiling engine"),
                 }
+                // Workspace state is confirmed by the protocol subscription.
+                // A failed write must never leave an optimistic selection behind.
+                self.sync_current_workspace_layout();
             }
             Message::ToggleActiveHint(toggled) => {
                 self.config.active_hint = toggled;
@@ -202,6 +295,7 @@ impl cosmic::Application for Window {
                 }
 
                 self.config = *c;
+                self.sync_current_workspace_layout();
             }
             Message::NewWorkspace(e) => {
                 let autotile_new = self.new_workspace_entity == e;
@@ -217,7 +311,7 @@ impl cosmic::Application for Window {
                         TilingState::FloatingOnly
                     };
 
-                    if let Err(err) = tx.send(AppRequest::DefaultBehavior(state)) {
+                    if let Err(err) = tx.try_send(AppRequest::DefaultBehavior(state)) {
                         error!("Failed to send the tiling state update. {err:?}");
                     }
                 }
@@ -233,17 +327,19 @@ impl cosmic::Application for Window {
                 cmd.arg("window-management");
                 tokio::spawn(cosmic::process::spawn(cmd));
             }
-            Message::Surface(a) => {
-                return cosmic::task::message(cosmic::Action::Surface(a));
-            }
         }
         Task::none()
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
+        let icon = match self.current_workspace_layout() {
+            WorkspaceLayoutMode::Floating => OFF,
+            WorkspaceLayoutMode::Tiling => ON,
+            WorkspaceLayoutMode::Scrolling => SCROLLING,
+        };
         self.core
             .applet
-            .icon_button(if self.autotiled { ON } else { OFF })
+            .icon_button(icon)
             .on_press_down(Message::TogglePopup)
             .into()
     }
@@ -259,13 +355,20 @@ impl cosmic::Application for Window {
         let new_workspace_behavior_button =
             segmented_control::horizontal(&self.new_workspace_behavior_model)
                 .on_activate(Message::NewWorkspace);
+        let mut current_workspace_layout_button =
+            segmented_control::horizontal(&self.current_workspace_layout_model);
+        if !self.layout_change_pending && self.workspace_tx.is_some() {
+            current_workspace_layout_button =
+                current_workspace_layout_button.on_activate(Message::CurrentWorkspaceLayout);
+        }
         let content_list = column![
             padded_control(container(
-                toggler(self.autotiled)
-                    .on_toggle(Message::ToggleTileWindows)
-                    .text_size(14)
-                    .width(Length::Fill)
-                    .label(fl!("tile-current"))
+                column![
+                    text::body(fl!("current-workspace-layout")),
+                    current_workspace_layout_button,
+                    text::caption(fl!("tiling-engine-global")),
+                ]
+                .spacing(space_xxxs)
             )),
             padded_control(divider::horizontal::default()).padding([space_xxs, space_s]),
             padded_control(
@@ -307,10 +410,69 @@ impl cosmic::Application for Window {
         ]
         .padding([8, 0]);
 
-        self.core.applet.popup_container(content_list).into()
+        self.core
+            .applet
+            .popup_container(content_list)
+            .limits(layout_popup_limits())
+            .into()
     }
 
     fn style(&self) -> Option<cosmic::iced::theme::Style> {
         Some(cosmic::applet::style())
     }
+}
+
+impl Window {
+    fn current_workspace_layout(&self) -> WorkspaceLayoutMode {
+        derive_layout_mode(self.autotiled, self.config.tiling_engine)
+    }
+
+    fn sync_current_workspace_layout(&mut self) {
+        let entity = self
+            .current_workspace_layout_entities
+            .entity(self.current_workspace_layout());
+        self.current_workspace_layout_model.activate(entity);
+    }
+
+    fn set_current_workspace_layout(
+        &mut self,
+        requested: WorkspaceLayoutMode,
+    ) -> app::Task<Message> {
+        // Serialize writes: detached threads can finish in reverse click order.
+        if self.layout_change_pending || self.workspace_tx.is_none() {
+            return Task::none();
+        }
+        let transition =
+            plan_layout_transition(self.autotiled, self.config.tiling_engine, requested);
+        if transition == LayoutTransition::default() {
+            self.sync_current_workspace_layout();
+            return Task::none();
+        }
+
+        self.layout_change_pending = true;
+        let helper = self.config_helper.clone();
+        cosmic::task::future(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                if let Some(engine) = transition.tiling_engine {
+                    helper
+                        .set("tiling_engine", engine)
+                        .map_err(|err| err.to_string())?;
+                }
+                Ok(transition)
+            })
+            .await
+            .unwrap_or_else(|err| Err(err.to_string()));
+            Message::LayoutChanged(result)
+        })
+    }
+}
+
+fn layout_popup_limits() -> Limits {
+    // Three choices plus the selected checkmark need more room than the
+    // standard two-choice applet popup; otherwise “Scrolling” is clipped.
+    Limits::NONE
+        .min_width(420.0)
+        .max_width(420.0)
+        .min_height(1.0)
+        .max_height(1000.0)
 }

@@ -1,11 +1,11 @@
 [Desktop Entry]
-Name=Tiling
-Comment=Manage the active hint, current & per-workspace auto-tiling
+Name=Window Layout
+Comment=Select Floating, Tiling, or Scrolling window layout
 Type=Application
 Exec=cosmic-applet-tiling
 Terminal=false
 Categories=COSMIC;
-Keywords=COSMIC;Applet;Tiling;Hint;Workspace;
+Keywords=COSMIC;Applet;Floating;Tiling;Scrolling;Hint;Workspace;
 Icon=com.system76.CosmicAppletTiling-symbolic
 StartupNotify=true
 NoDisplay=true
