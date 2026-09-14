@@ -3,6 +3,7 @@
 
 use crate::window::Window;
 
+mod layout;
 mod localize;
 mod wayland;
 mod wayland_subscription;
