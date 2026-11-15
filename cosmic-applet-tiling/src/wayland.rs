@@ -97,16 +97,15 @@ pub fn spawn_workspaces(tx: mpsc::Sender<TilingState>) -> SyncSender<AppRequest>
                                 .iter()
                                 .filter_map(|handle| state.workspace_state.workspace_info(handle))
                                 .find(|w| w.state.contains(ext_workspace_handle_v1::State::Active))
-                        }) {
-                            if let Some(cosmic_handle) = &w.cosmic_handle {
-                                cosmic_handle.set_tiling_state(autotile);
-                                state
-                                    .workspace_state
-                                    .workspace_manager()
-                                    .get()
-                                    .unwrap()
-                                    .commit();
-                            }
+                        }) && let Some(cosmic_handle) = &w.cosmic_handle
+                        {
+                            cosmic_handle.set_tiling_state(autotile);
+                            state
+                                .workspace_state
+                                .workspace_manager()
+                                .get()
+                                .unwrap()
+                                .commit();
                         }
                     }
                     Event::Msg(AppRequest::DefaultBehavior(tiling)) => {
@@ -221,10 +220,10 @@ impl OutputHandler for State {
         let info = self.output_state.info(&output).unwrap();
         if info.name.as_deref() == Some(&self.configured_output) {
             self.expected_output = Some(output);
-            if self.have_workspaces {
-                if let Some(s) = self.tiling_state() {
-                    let _ = block_on(self.tx.send(s));
-                }
+            if self.have_workspaces
+                && let Some(s) = self.tiling_state()
+            {
+                let _ = block_on(self.tx.send(s));
             }
         }
     }

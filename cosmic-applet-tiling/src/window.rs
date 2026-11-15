@@ -265,10 +265,10 @@ impl cosmic::Application for Window {
                             } else {
                                 TilingState::FloatingOnly
                             };
-                            if let Some(tx) = &self.workspace_tx {
-                                if let Err(err) = tx.try_send(AppRequest::TilingState(state)) {
-                                    error!(?err, "Failed to request workspace layout");
-                                }
+                            if let Some(tx) = &self.workspace_tx
+                                && let Err(err) = tx.try_send(AppRequest::TilingState(state))
+                            {
+                                error!(?err, "Failed to request workspace layout");
                             }
                         }
                     }

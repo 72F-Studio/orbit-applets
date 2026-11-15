@@ -11,7 +11,8 @@ parallel-test-install = []
 libcosmic.workspace = true
 anyhow.workspace = true
 cctk.workspace = true
-cosmic-comp-config = { path = "../cosmic-comp/cosmic-comp-config" }
+# Orbit: needs TilingEngine from the Orbit compositor fork. Switch to its git URL once published.
+cosmic-comp-config = { path = "../../orbit-comp/cosmic-comp-config" }
 cosmic-protocols.workspace = true
 i18n-embed-fl.workspace = true
 i18n-embed.workspace = true

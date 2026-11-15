@@ -1088,7 +1088,7 @@ name = "cosmic-applet-input-sources"
 version = "1.11.0"
 dependencies = [
  "cosmic-client-toolkit",
- "cosmic-comp-config",
+ "cosmic-comp-config 0.1.0",
  "futures",
  "i18n-embed",
  "i18n-embed-fl",
@@ -1210,7 +1210,7 @@ version = "1.11.0"
 dependencies = [
  "anyhow",
  "cosmic-client-toolkit",
- "cosmic-comp-config",
+ "cosmic-comp-config 1.0.0",
  "cosmic-protocols",
  "i18n-embed",
  "i18n-embed-fl",
@@ -1314,7 +1314,16 @@ version = "0.1.0"
 source = "git+https://github.com/pop-os/cosmic-comp.git?rev=5eb5af4#5eb5af46756f2f2bc5e812cf68fe4c4b79efd924"
 dependencies = [
  "cosmic-config",
- "input",
+ "input 0.9.1",
+ "serde",
+]
+
+[[package]]
+name = "cosmic-comp-config"
+version = "1.0.0"
+dependencies = [
+ "cosmic-config",
+ "input 0.10.0",
  "serde",
 ]
 
@@ -3683,6 +3692,19 @@ name = "input"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fbdc09524a91f9cacd26f16734ff63d7dc650daffadd2b6f84d17a285bd875a9"
+dependencies = [
+ "bitflags 2.13.2",
+ "input-sys",
+ "libc",
+ "log",
+ "udev",
+]
+
+[[package]]
+name = "input"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9793345a65d71317763a33066b5d8351f8760dde8d4930fe9e39b5f14a7959d"
 dependencies = [
  "bitflags 2.13.2",
  "input-sys",
