@@ -1,0 +1,17 @@
+[package]
+name = "orbit-applet-corners"
+version = "1.11.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Orbit: set the dock's corner radius from the panel"
+
+[dependencies]
+libcosmic.workspace = true
+cosmic-config.workspace = true
+i18n-embed-fl.workspace = true
+i18n-embed.workspace = true
+rust-embed = { workspace = true, features = ["debug-embed"] }
+serde.workspace = true
+tracing-log.workspace = true
+tracing-subscriber.workspace = true
+tracing.workspace = true

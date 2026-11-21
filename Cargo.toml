@@ -20,6 +20,7 @@ members = [
     "cosmic-applet-input-sources",
     "cosmic-applet-a11y",
     "cosmic-applets-config",
+    "orbit-applet-corners",
 ]
 
 resolver = "3"

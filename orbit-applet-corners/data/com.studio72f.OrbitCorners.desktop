@@ -1,0 +1,14 @@
+[Desktop Entry]
+Name=Corners
+Comment=Set corner radius for the dock, panel and theme
+Type=Application
+Exec=orbit-applet-corners
+Terminal=false
+Categories=COSMIC;
+Keywords=COSMIC;Applet;Orbit;Dock;Panel;Radius;Roundness;Rounded;
+Icon=com.studio72f.OrbitCorners-symbolic
+StartupNotify=true
+NoDisplay=true
+X-CosmicApplet=true
+X-CosmicShrinkable=true
+X-CosmicHoverPopup=Auto
