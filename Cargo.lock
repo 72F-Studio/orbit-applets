@@ -1321,6 +1321,7 @@ dependencies = [
 [[package]]
 name = "cosmic-comp-config"
 version = "1.0.0"
+source = "git+https://github.com/72F-Studio/orbit-comp?branch=main#c76a6c5f02f49ee620bbed156fbcd0c63c5ee3c2"
 dependencies = [
  "cosmic-config",
  "input 0.10.0",
