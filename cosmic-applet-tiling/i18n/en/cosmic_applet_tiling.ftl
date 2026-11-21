@@ -40,3 +40,7 @@ position-indicator = Show position bar
 strip-overview = Overview
 scroll-view = Scroll view
 first-last-column = First or last window
+scrolling-settings = Scrolling settings
+width-rules = Per-app widths
+width-rules-empty = Press Super + Alt + W to open the focused app at its current width from now on.
+remove = Remove

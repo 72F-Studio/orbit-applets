@@ -23,7 +23,7 @@ use cosmic::{
     },
     theme,
     widget::{
-        container, divider,
+        button, container, divider, icon,
         segmented_button::{self, Entity, SingleSelectModel},
         segmented_control, slider, text, toggler,
     },
@@ -106,6 +106,8 @@ pub struct Window {
     centering_entities: Vec<(Entity, CenteringPolicy)>,
     position_model: segmented_button::SingleSelectModel,
     position_entities: Vec<(Entity, NewWindowPosition)>,
+    /// Orbit: whether the Scrolling settings section is open.
+    scrolling_expanded: bool,
     /// may not match the config value if behavior is per-workspace
     autotiled: bool,
     layout_change_pending: bool,
@@ -134,6 +136,8 @@ pub enum Message {
     ToggleCenterSingle(bool),
     ToggleDimOffscreen(bool),
     TogglePositionIndicator(bool),
+    ToggleScrollingSection,
+    RemoveWidthRule(usize),
     SaveScrolling,
 }
 
@@ -265,6 +269,7 @@ impl cosmic::Application for Window {
             centering_entities,
             position_model,
             position_entities,
+            scrolling_expanded: false,
             workspace_tx: None,
         };
         window.sync_width_model();
@@ -482,6 +487,15 @@ impl cosmic::Application for Window {
                 self.config.scrolling.position_indicator = enabled;
                 self.save_scrolling();
             }
+            Message::ToggleScrollingSection => {
+                self.scrolling_expanded = !self.scrolling_expanded;
+            }
+            Message::RemoveWidthRule(index) => {
+                if index < self.config.scrolling.width_rules.len() {
+                    self.config.scrolling.width_rules.remove(index);
+                    self.save_scrolling();
+                }
+            }
             Message::SaveScrolling => self.save_scrolling(),
             Message::OpenSettings => {
                 let mut cmd = std::process::Command::new("cosmic-settings");
@@ -596,6 +610,22 @@ impl Window {
         if self.config.tiling_engine != TilingEngine::Scrolling {
             return column![].into();
         }
+        let chevron = if self.scrolling_expanded {
+            "go-up-symbolic"
+        } else {
+            "go-down-symbolic"
+        };
+        let header = column![
+            padded_control(divider::horizontal::default()).padding([space_xxs, space_s]),
+            menu_button(row!(
+                text::body(fl!("scrolling-settings")).width(Length::Fill),
+                icon::from_name(chevron).size(16).icon(),
+            ))
+            .on_press(Message::ToggleScrollingSection),
+        ];
+        if !self.scrolling_expanded {
+            return header.into();
+        }
         let scrolling = &self.config.scrolling;
         let custom = self.width_custom_selected
             || width_choice(scrolling.new_column_width) == WidthChoice::Custom;
@@ -644,9 +674,26 @@ impl Window {
             );
         }
 
+        let mut rules = column![text::body(fl!("width-rules"))].spacing(space_xxxs);
+        if scrolling.width_rules.is_empty() {
+            rules = rules.push(text::caption(fl!("width-rules-empty")));
+        }
+        for (index, rule) in scrolling.width_rules.iter().enumerate() {
+            rules = rules.push(
+                row!(
+                    text::body(rule.app_id.clone()).width(Length::Fill),
+                    text::body(percent(rule.width)),
+                    button::text(fl!("remove")).on_press(Message::RemoveWidthRule(index)),
+                )
+                .spacing(space_xxs)
+                .align_y(cosmic::iced::Alignment::Center),
+            );
+        }
+
         column![
-            padded_control(divider::horizontal::default()).padding([space_xxs, space_s]),
+            header,
             padded_control(width),
+            padded_control(rules),
             padded_control(focus),
             padded_control(
                 column![
