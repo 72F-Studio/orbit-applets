@@ -1,7 +1,8 @@
 # Notice
 
 This is a modified version of [cosmic-applets](https://github.com/pop-os/cosmic-applets)
-by System76, kept for the Orbit scrolling tiling compositor (`orbit-comp`). It
+by System76, kept for the Orbit scrolling tiling compositor
+([72F-Studio/orbit-comp](https://github.com/72F-Studio/orbit-comp)). It
 is not a System76 project and is not supported by the COSMIC developers.
 
 ## Licence
