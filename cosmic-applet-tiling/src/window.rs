@@ -28,7 +28,10 @@ use cosmic::{
         segmented_control, slider, text, toggler,
     },
 };
-use cosmic_comp_config::{CosmicCompConfig, ScrollingConfig, TileBehavior, TilingEngine};
+use cosmic_comp_config::{
+    CenteringPolicy, CosmicCompConfig, NewWindowPosition, ScrollingConfig, TileBehavior,
+    TilingEngine,
+};
 use cosmic_protocols::workspace::v2::client::zcosmic_workspace_handle_v2::TilingState;
 use std::thread;
 use tracing::error;
@@ -98,6 +101,11 @@ pub struct Window {
     width_custom_entity: Entity,
     /// Custom is picked but the stored width still matches a preset.
     width_custom_selected: bool,
+    /// Orbit: centering policy and new-window position choices.
+    centering_model: segmented_button::SingleSelectModel,
+    centering_entities: Vec<(Entity, CenteringPolicy)>,
+    position_model: segmented_button::SingleSelectModel,
+    position_entities: Vec<(Entity, NewWindowPosition)>,
     /// may not match the config value if behavior is per-workspace
     autotiled: bool,
     layout_change_pending: bool,
@@ -121,6 +129,11 @@ pub enum Message {
     ToggleFocusFollowsScroll(bool),
     FocusThresholdChanged(f64),
     ToggleBackdropBlur(bool),
+    Centering(Entity),
+    NewWindowPosition(Entity),
+    ToggleCenterSingle(bool),
+    ToggleDimOffscreen(bool),
+    TogglePositionIndicator(bool),
     SaveScrolling,
 }
 
@@ -200,6 +213,39 @@ impl cosmic::Application for Window {
             .collect::<Vec<_>>();
         let width_custom_entity = width_model.insert().text(fl!("custom")).id();
 
+        let mut centering_model = SingleSelectModel::default();
+        let centering_entities = vec![
+            (
+                centering_model.insert().text(fl!("centering-lazy")).id(),
+                CenteringPolicy::Lazy,
+            ),
+            (
+                centering_model.insert().text(fl!("centering-always")).id(),
+                CenteringPolicy::Always,
+            ),
+            (
+                centering_model
+                    .insert()
+                    .text(fl!("centering-on-overflow"))
+                    .id(),
+                CenteringPolicy::OnOverflow,
+            ),
+        ];
+        let mut position_model = SingleSelectModel::default();
+        let position_entities = vec![
+            (
+                position_model
+                    .insert()
+                    .text(fl!("position-after-focused"))
+                    .id(),
+                NewWindowPosition::AfterFocused,
+            ),
+            (
+                position_model.insert().text(fl!("position-end")).id(),
+                NewWindowPosition::End,
+            ),
+        ];
+
         let mut window = Self {
             core,
             popup: None,
@@ -215,6 +261,10 @@ impl cosmic::Application for Window {
             width_entities,
             width_custom_entity,
             width_custom_selected: false,
+            centering_model,
+            centering_entities,
+            position_model,
+            position_entities,
             workspace_tx: None,
         };
         window.sync_width_model();
@@ -401,6 +451,37 @@ impl cosmic::Application for Window {
                 self.config.scrolling.backdrop_blur = enabled;
                 self.save_scrolling();
             }
+            Message::Centering(entity) => {
+                if let Some((_, policy)) =
+                    self.centering_entities.iter().find(|(e, _)| *e == entity)
+                {
+                    self.config.scrolling.centering = *policy;
+                    self.centering_model.activate(entity);
+                    self.save_scrolling();
+                }
+            }
+            Message::NewWindowPosition(entity) => {
+                if let Some((_, position)) =
+                    self.position_entities.iter().find(|(e, _)| *e == entity)
+                {
+                    self.config.scrolling.new_window_position = *position;
+                    self.position_model.activate(entity);
+                    self.save_scrolling();
+                }
+            }
+            Message::ToggleCenterSingle(enabled) => {
+                self.config.scrolling.center_single_column = enabled;
+                self.save_scrolling();
+            }
+            Message::ToggleDimOffscreen(enabled) => {
+                self.config.scrolling.offscreen_opacity =
+                    if enabled { DIMMED_OPACITY } else { 1.0 };
+                self.save_scrolling();
+            }
+            Message::TogglePositionIndicator(enabled) => {
+                self.config.scrolling.position_indicator = enabled;
+                self.save_scrolling();
+            }
             Message::SaveScrolling => self.save_scrolling(),
             Message::OpenSettings => {
                 let mut cmd = std::process::Command::new("cosmic-settings");
@@ -515,7 +596,7 @@ impl Window {
         if self.config.tiling_engine != TilingEngine::Scrolling {
             return column![].into();
         }
-        let scrolling = self.config.scrolling;
+        let scrolling = &self.config.scrolling;
         let custom = self.width_custom_selected
             || width_choice(scrolling.new_column_width) == WidthChoice::Custom;
 
@@ -568,18 +649,83 @@ impl Window {
             padded_control(width),
             padded_control(focus),
             padded_control(
+                column![
+                    text::body(fl!("centering")),
+                    segmented_control::horizontal(&self.centering_model)
+                        .on_activate(Message::Centering),
+                ]
+                .spacing(space_xxxs)
+            ),
+            padded_control(
+                column![
+                    text::body(fl!("new-window-position")),
+                    segmented_control::horizontal(&self.position_model)
+                        .on_activate(Message::NewWindowPosition),
+                ]
+                .spacing(space_xxxs)
+            ),
+            padded_control(
+                toggler(scrolling.center_single_column)
+                    .on_toggle(Message::ToggleCenterSingle)
+                    .label(fl!("center-single-column"))
+                    .text_size(14)
+                    .width(Length::Fill),
+            ),
+            padded_control(
                 toggler(scrolling.backdrop_blur)
                     .on_toggle(Message::ToggleBackdropBlur)
                     .label(fl!("backdrop-blur"))
                     .text_size(14)
                     .width(Length::Fill),
             ),
+            padded_control(
+                toggler(scrolling.clamped_offscreen_opacity() < 1.0)
+                    .on_toggle(Message::ToggleDimOffscreen)
+                    .label(fl!("dim-offscreen"))
+                    .text_size(14)
+                    .width(Length::Fill),
+            ),
+            padded_control(
+                toggler(scrolling.position_indicator)
+                    .on_toggle(Message::TogglePositionIndicator)
+                    .label(fl!("position-indicator"))
+                    .text_size(14)
+                    .width(Length::Fill),
+            ),
+            padded_control(row!(
+                text::body(fl!("strip-overview")).width(Length::Fill),
+                text::body(format!("{} + {} + O", fl!("shift"), fl!("super"))),
+            )),
+            padded_control(row!(
+                text::body(fl!("scroll-view")).width(Length::Fill),
+                text::body(format!("{} + PgUp / PgDn", fl!("super"))),
+            )),
+            padded_control(row!(
+                text::body(fl!("first-last-column")).width(Length::Fill),
+                text::body(format!("{} + Home / End", fl!("super"))),
+            )),
         ]
         .into()
     }
 
-    /// Orbit: select the width choice matching the stored value.
+    /// Orbit: select the width, centering and position choices that match
+    /// the stored settings.
     fn sync_width_model(&mut self) {
+        let scrolling = &self.config.scrolling;
+        if let Some((entity, _)) = self
+            .centering_entities
+            .iter()
+            .find(|(_, p)| *p == scrolling.centering)
+        {
+            self.centering_model.activate(*entity);
+        }
+        if let Some((entity, _)) = self
+            .position_entities
+            .iter()
+            .find(|(_, p)| *p == scrolling.new_window_position)
+        {
+            self.position_model.activate(*entity);
+        }
         let entity = match width_choice(self.config.scrolling.new_column_width) {
             WidthChoice::Preset(index) if !self.width_custom_selected => self.width_entities[index],
             _ => self.width_custom_entity,
@@ -590,7 +736,7 @@ impl Window {
     /// Orbit: write the Scrolling settings off the UI thread.
     fn save_scrolling(&self) {
         let helper = self.config_helper.clone();
-        let scrolling = self.config.scrolling;
+        let scrolling = self.config.scrolling.clone();
         thread::spawn(move || {
             if let Err(err) = helper.set("scrolling", scrolling) {
                 error!(?err, "Failed to save scrolling settings");
@@ -641,6 +787,9 @@ impl Window {
         })
     }
 }
+
+/// Opacity the "dim windows partly off screen" switch uses.
+const DIMMED_OPACITY: f64 = 0.6;
 
 fn layout_popup_limits() -> Limits {
     // Three choices plus the selected checkmark need more room than the
