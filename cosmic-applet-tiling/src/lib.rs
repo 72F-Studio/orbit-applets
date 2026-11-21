@@ -5,6 +5,7 @@ use crate::window::Window;
 
 mod layout;
 mod localize;
+mod scrolling_settings;
 mod wayland;
 mod wayland_subscription;
 mod window;

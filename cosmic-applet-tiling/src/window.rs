@@ -4,6 +4,7 @@
 use crate::{
     fl,
     layout::{LayoutTransition, WorkspaceLayoutMode, derive_layout_mode, plan_layout_transition},
+    scrolling_settings::{WidthChoice, percent, snap_threshold, snap_width, width_choice},
     wayland::AppRequest,
     wayland_subscription,
     wayland_subscription::WorkspacesUpdate,
@@ -24,10 +25,10 @@ use cosmic::{
     widget::{
         container, divider,
         segmented_button::{self, Entity, SingleSelectModel},
-        segmented_control, text, toggler,
+        segmented_control, slider, text, toggler,
     },
 };
-use cosmic_comp_config::{CosmicCompConfig, TileBehavior};
+use cosmic_comp_config::{CosmicCompConfig, ScrollingConfig, TileBehavior, TilingEngine};
 use cosmic_protocols::workspace::v2::client::zcosmic_workspace_handle_v2::TilingState;
 use std::thread;
 use tracing::error;
@@ -89,7 +90,14 @@ pub struct Window {
     current_workspace_layout_model: segmented_button::SingleSelectModel,
     current_workspace_layout_entities: LayoutEntities,
     new_workspace_behavior_model: segmented_button::SingleSelectModel,
-    new_workspace_entity: Entity,
+    /// Orbit: Floating, Tiling and Scrolling choices for new workspaces.
+    new_workspace_entities: LayoutEntities,
+    /// Orbit: 25/50/75/90%/Custom choices for a new window's width.
+    width_model: segmented_button::SingleSelectModel,
+    width_entities: Vec<Entity>,
+    width_custom_entity: Entity,
+    /// Custom is picked but the stored width still matches a preset.
+    width_custom_selected: bool,
     /// may not match the config value if behavior is per-workspace
     autotiled: bool,
     layout_change_pending: bool,
@@ -107,6 +115,13 @@ pub enum Message {
     WorkspaceUpdate(WorkspacesUpdate),
     NewWorkspace(Entity),
     OpenSettings,
+    // Orbit: Scrolling settings
+    NewWindowWidth(Entity),
+    CustomWidthChanged(f64),
+    ToggleFocusFollowsScroll(bool),
+    FocusThresholdChanged(f64),
+    ToggleBackdropBlur(bool),
+    SaveScrolling,
 }
 
 impl cosmic::Application for Window {
@@ -159,21 +174,33 @@ impl cosmic::Application for Window {
         );
 
         let mut new_workspace_behavior_model = SingleSelectModel::default();
-        let new_workspace_entity = new_workspace_behavior_model
-            .insert()
-            .text(fl!("tiled"))
-            .id();
-        let floating = new_workspace_behavior_model
-            .insert()
-            .text(fl!("floating"))
-            .id();
-        new_workspace_behavior_model.activate(if config.autotile {
-            new_workspace_entity
-        } else {
-            floating
-        });
+        let new_workspace_entities = LayoutEntities {
+            floating: new_workspace_behavior_model
+                .insert()
+                .text(fl!("floating"))
+                .id(),
+            tiling: new_workspace_behavior_model
+                .insert()
+                .text(fl!("tiling"))
+                .id(),
+            scrolling: new_workspace_behavior_model
+                .insert()
+                .text(fl!("scrolling"))
+                .id(),
+        };
+        new_workspace_behavior_model.activate(
+            new_workspace_entities
+                .entity(derive_layout_mode(config.autotile, config.tiling_engine)),
+        );
 
-        let window = Self {
+        let mut width_model = SingleSelectModel::default();
+        let width_entities = ScrollingConfig::NEW_COLUMN_WIDTH_PRESETS
+            .iter()
+            .map(|preset| width_model.insert().text(percent(*preset)).id())
+            .collect::<Vec<_>>();
+        let width_custom_entity = width_model.insert().text(fl!("custom")).id();
+
+        let mut window = Self {
             core,
             popup: None,
             autotiled: config.autotile,
@@ -183,9 +210,14 @@ impl cosmic::Application for Window {
             current_workspace_layout_model,
             current_workspace_layout_entities,
             new_workspace_behavior_model,
-            new_workspace_entity,
+            new_workspace_entities,
+            width_model,
+            width_entities,
+            width_custom_entity,
+            width_custom_selected: false,
             workspace_tx: None,
         };
+        window.sync_width_model();
         (window, Task::none())
     }
 
@@ -289,16 +321,37 @@ impl cosmic::Application for Window {
                 });
             }
             Message::MyConfigUpdate(c) => {
-                if c.autotile != self.config.autotile {
-                    self.new_workspace_behavior_model
-                        .activate_position(if c.autotile { 0 } else { 1 });
-                }
-
                 self.config = *c;
+                self.new_workspace_behavior_model
+                    .activate(self.new_workspace_entities.entity(derive_layout_mode(
+                        self.config.autotile,
+                        self.config.tiling_engine,
+                    )));
+                self.sync_width_model();
                 self.sync_current_workspace_layout();
             }
             Message::NewWorkspace(e) => {
-                let autotile_new = self.new_workspace_entity == e;
+                let Some(mode) = self.new_workspace_entities.mode(e) else {
+                    error!("Unknown new-workspace layout entity");
+                    return Task::none();
+                };
+                let autotile_new = mode != WorkspaceLayoutMode::Floating;
+                // Orbit: Tiling and Scrolling share the one global engine.
+                let engine = match mode {
+                    WorkspaceLayoutMode::Floating => None,
+                    WorkspaceLayoutMode::Tiling => Some(TilingEngine::Classic),
+                    WorkspaceLayoutMode::Scrolling => Some(TilingEngine::Scrolling),
+                }
+                .filter(|engine| *engine != self.config.tiling_engine);
+                if let Some(engine) = engine {
+                    self.config.tiling_engine = engine;
+                    let helper = self.config_helper.clone();
+                    thread::spawn(move || {
+                        if let Err(err) = helper.set("tiling_engine", engine) {
+                            error!(?err, "Failed to set tiling_engine {engine:?}");
+                        }
+                    });
+                }
                 self.config.autotile = autotile_new;
                 self.new_workspace_behavior_model.activate(e);
                 // set the config autotile behavior
@@ -322,6 +375,33 @@ impl cosmic::Application for Window {
                     }
                 });
             }
+            Message::NewWindowWidth(entity) => {
+                if entity == self.width_custom_entity {
+                    self.width_custom_selected = true;
+                    self.width_model.activate(entity);
+                } else if let Some(index) = self.width_entities.iter().position(|e| *e == entity) {
+                    self.width_custom_selected = false;
+                    self.config.scrolling.new_column_width =
+                        ScrollingConfig::NEW_COLUMN_WIDTH_PRESETS[index];
+                    self.width_model.activate(entity);
+                    self.save_scrolling();
+                }
+            }
+            Message::CustomWidthChanged(value) => {
+                self.config.scrolling.new_column_width = snap_width(value);
+            }
+            Message::ToggleFocusFollowsScroll(enabled) => {
+                self.config.scrolling.focus_follows_scroll = enabled;
+                self.save_scrolling();
+            }
+            Message::FocusThresholdChanged(value) => {
+                self.config.scrolling.focus_scroll_threshold = snap_threshold(value);
+            }
+            Message::ToggleBackdropBlur(enabled) => {
+                self.config.scrolling.backdrop_blur = enabled;
+                self.save_scrolling();
+            }
+            Message::SaveScrolling => self.save_scrolling(),
             Message::OpenSettings => {
                 let mut cmd = std::process::Command::new("cosmic-settings");
                 cmd.arg("window-management");
@@ -378,6 +458,7 @@ impl cosmic::Application for Window {
                 ]
                 .spacing(space_xxxs)
             ),
+            self.scrolling_settings(space_xxxs, space_xxs, space_s),
             padded_control(divider::horizontal::default()).padding([space_xxs, space_s]),
             padded_control(row!(
                 text::body(fl!("navigate-windows")).width(Length::Fill),
@@ -423,6 +504,100 @@ impl cosmic::Application for Window {
 }
 
 impl Window {
+    /// Orbit: settings that only apply to the Scrolling engine. Hidden while
+    /// the engine is Classic, so the popup stays as short as upstream's.
+    fn scrolling_settings(
+        &self,
+        space_xxxs: u16,
+        space_xxs: u16,
+        space_s: u16,
+    ) -> Element<'_, Message> {
+        if self.config.tiling_engine != TilingEngine::Scrolling {
+            return column![].into();
+        }
+        let scrolling = self.config.scrolling;
+        let custom = self.width_custom_selected
+            || width_choice(scrolling.new_column_width) == WidthChoice::Custom;
+
+        let mut width = column![
+            row!(
+                text::body(fl!("new-window-width")).width(Length::Fill),
+                text::body(percent(scrolling.clamped_new_column_width())),
+            ),
+            segmented_control::horizontal(&self.width_model).on_activate(Message::NewWindowWidth),
+        ]
+        .spacing(space_xxxs);
+        if custom {
+            width = width.push(
+                slider(
+                    ScrollingConfig::MIN_COLUMN_WIDTH..=1.0,
+                    scrolling.clamped_new_column_width(),
+                    Message::CustomWidthChanged,
+                )
+                .step(0.01)
+                .on_release(Message::SaveScrolling),
+            );
+        }
+
+        let mut focus = column![
+            toggler(scrolling.focus_follows_scroll)
+                .on_toggle(Message::ToggleFocusFollowsScroll)
+                .label(fl!("focus-follows-scroll"))
+                .text_size(14)
+                .width(Length::Fill),
+        ]
+        .spacing(space_xxxs);
+        if scrolling.focus_follows_scroll {
+            focus = focus.push(row!(
+                text::caption(fl!("focus-scroll-threshold")).width(Length::Fill),
+                text::caption(percent(scrolling.clamped_focus_scroll_threshold())),
+            ));
+            focus = focus.push(
+                slider(
+                    0.1..=1.0,
+                    scrolling.clamped_focus_scroll_threshold(),
+                    Message::FocusThresholdChanged,
+                )
+                .step(0.05)
+                .on_release(Message::SaveScrolling),
+            );
+        }
+
+        column![
+            padded_control(divider::horizontal::default()).padding([space_xxs, space_s]),
+            padded_control(width),
+            padded_control(focus),
+            padded_control(
+                toggler(scrolling.backdrop_blur)
+                    .on_toggle(Message::ToggleBackdropBlur)
+                    .label(fl!("backdrop-blur"))
+                    .text_size(14)
+                    .width(Length::Fill),
+            ),
+        ]
+        .into()
+    }
+
+    /// Orbit: select the width choice matching the stored value.
+    fn sync_width_model(&mut self) {
+        let entity = match width_choice(self.config.scrolling.new_column_width) {
+            WidthChoice::Preset(index) if !self.width_custom_selected => self.width_entities[index],
+            _ => self.width_custom_entity,
+        };
+        self.width_model.activate(entity);
+    }
+
+    /// Orbit: write the Scrolling settings off the UI thread.
+    fn save_scrolling(&self) {
+        let helper = self.config_helper.clone();
+        let scrolling = self.config.scrolling;
+        thread::spawn(move || {
+            if let Err(err) = helper.set("scrolling", scrolling) {
+                error!(?err, "Failed to save scrolling settings");
+            }
+        });
+    }
+
     fn current_workspace_layout(&self) -> WorkspaceLayoutMode {
         derive_layout_mode(self.autotiled, self.config.tiling_engine)
     }
